@@ -24,7 +24,7 @@ variable "admin_principal_arns" {
     e.g. ["arn:aws:iam::123456789012:user/steven"].
   EOT
   type        = list(string)
-  default     = ["arn:aws:iam::127214197057:user/levelp"]                                                                                   "]
+  default     = ["arn:aws:iam::127214197057:user/levelp"]
 }
 
 variable "node_instance_types" {
