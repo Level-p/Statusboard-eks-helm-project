@@ -12,7 +12,7 @@ variable "region" {
 variable "github_repository" {
   description = "GitHub repository allowed to deploy, in OWNER/REPO form"
   type        = string
-  default     = "your-github-user/statusboard"
+  default     = "https://github.com/Level-p/Statusboard-eks-helm-project.git"
 }
 
 variable "create_github_oidc_provider" {
