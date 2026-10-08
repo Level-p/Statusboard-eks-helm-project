@@ -1,0 +1,186 @@
+# ---------------------------------------------------------------------------
+# StatusBoard application CI/CD (folder: app/)
+#
+#   test            -> go vet, go test, hadolint, helm lint + render for both environments
+#   build           -> docker build, Trivy scan, push to Amazon ECR (tag = commit SHA)
+#   deploy-staging  -> helm upgrade into statusboard-staging, smoke test        (automatic)
+#   deploy-prod     -> the SAME image into statusboard-prod, smoke test         (needs approval)
+#
+# Pull requests run "test" only. Pushes to main run everything.
+# Runs after the infrastructure exists (StatusBoard Infrastructure workflow).
+#
+# Required repository secret:   AWS_ROLE_ARN
+# Optional repository variable: DOMAIN_NAME (defaults to mfon21.space)
+# GitHub environments:          "staging" (no rules) and "production" (required reviewers)
+# ---------------------------------------------------------------------------
+name: StatusBoard Application
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "app/**"
+      - ".github/workflows/statusboard-app.yml"
+      - ".github/actions/statusboard-deploy/**"
+  pull_request:
+    paths:
+      - "app/**"
+      - ".github/workflows/statusboard-app.yml"
+  workflow_dispatch:
+
+permissions:
+  id-token: write   # GitHub OIDC -> AWS
+  contents: read
+
+# Never run two deployments at the same time (an interrupted helm upgrade
+# leaves the release "pending" and blocks the next one)
+concurrency:
+  group: statusboard-app-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: eu-west-2
+  CLUSTER_NAME: statusboard-eks
+  ECR_REPOSITORY: statusboard-eks/statusboard
+  APP_DIR: app
+  CHART: app/helm/statusboard
+  ENV_VALUES: app/helm/environments
+  RELEASE: statusboard
+  DOMAIN_NAME: ${{ vars.DOMAIN_NAME || 'mfon21.space' }}
+  HELM_VERSION: v3.22.0
+  GO_VERSION: "1.27"
+
+jobs:
+  test:
+    name: Test, lint and render
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: ${{ env.APP_DIR }}/go.sum
+
+      - name: Go vet and unit tests
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          test -z "$(gofmt -l .)" || { echo "Run gofmt on:"; gofmt -l .; exit 1; }
+          go vet ./...
+          go test -race -count=1 ./...
+
+      - name: Hadolint
+        uses: hadolint/hadolint-action@v3.5.0
+        with:
+          dockerfile: ${{ env.APP_DIR }}/Dockerfile
+          failure-threshold: error
+
+      - uses: azure/setup-helm@v5
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Helm lint and render (staging and prod)
+        run: |
+          for env in staging prod; do
+            echo "::group::$env"
+            helm lint "$CHART" -f "$ENV_VALUES/$env.yaml" --set backup.bucket=ci --set dataExport.bucket=ci --set image.tag=ci
+            helm template "$RELEASE" "$CHART" -n "statusboard-$env" -f "$ENV_VALUES/$env.yaml" \
+              --set backup.bucket=ci --set dataExport.bucket=ci --set image.tag=ci \
+              --api-versions monitoring.coreos.com/v1/ServiceMonitor \
+              --api-versions monitoring.coreos.com/v1/PrometheusRule > /dev/null
+            echo "::endgroup::"
+          done
+
+  build:
+    name: Build, scan and push to ECR
+    needs: test
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Image name
+        id: meta
+        run: |
+          TAG="${GITHUB_SHA::12}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "image=${{ steps.ecr.outputs.registry }}/${ECR_REPOSITORY}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Build image (load locally for scanning)
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ env.APP_DIR }}
+          load: true
+          build-args: VERSION=${{ steps.meta.outputs.tag }}
+          tags: ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Trivy vulnerability scan
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"     # a distroless Go image should have none; block the release if it does
+          format: table
+
+      - name: Push image to ECR
+        run: docker push "${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}"
+
+  deploy-staging:
+    name: Deploy to staging
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: staging
+      url: https://status-staging.${{ vars.DOMAIN_NAME || 'mfon21.space' }}
+    env:
+      ENVIRONMENT: staging
+      HOST: status-staging.${{ vars.DOMAIN_NAME || 'mfon21.space' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/statusboard-deploy
+        with:
+          role-arn: ${{ secrets.AWS_ROLE_ARN }}
+          environment: ${{ env.ENVIRONMENT }}
+          host: ${{ env.HOST }}
+          image: ${{ needs.build.outputs.image }}
+          tag: ${{ needs.build.outputs.tag }}
+
+  deploy-prod:
+    name: Deploy to production
+    needs: [build, deploy-staging]
+    runs-on: ubuntu-latest
+    # Add "Required reviewers" to this environment in Settings > Environments:
+    # the job waits here until someone approves the release
+    environment:
+      name: production
+      url: https://status.${{ vars.DOMAIN_NAME || 'mfon21.space' }}
+    env:
+      ENVIRONMENT: prod
+      HOST: status.${{ vars.DOMAIN_NAME || 'mfon21.space' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/statusboard-deploy
+        with:
+          role-arn: ${{ secrets.AWS_ROLE_ARN }}
+          environment: ${{ env.ENVIRONMENT }}
+          host: ${{ env.HOST }}
+          image: ${{ needs.build.outputs.image }}
+          tag: ${{ needs.build.outputs.tag }}

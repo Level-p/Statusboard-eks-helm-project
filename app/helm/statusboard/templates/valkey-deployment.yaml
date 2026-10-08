@@ -1,0 +1,89 @@
+{{- if .Values.valkey.enabled }}
+{{- $name := include "statusboard.valkeyName" . -}}
+{{- $secret := include "statusboard.secretName" . -}}
+# Valkey (the open-source Redis fork) is only a cache: if it restarts empty,
+# the app simply reads from PostgreSQL again. So it needs no disk and runs as a
+# plain Deployment, not a StatefulSet.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "statusboard.labels" . | nindent 4 }}
+    app.kubernetes.io/component: valkey
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "statusboard.selectorLabels" (dict "root" . "component" "valkey") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "statusboard.selectorLabels" (dict "root" . "component" "valkey") | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999   # "valkey" user in the official image
+        runAsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: valkey
+          image: "{{ .Values.valkey.image.repository }}:{{ .Values.valkey.image.tag }}"
+          env:
+            - name: VALKEY_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: {{ $secret }}, key: valkey-password }
+          # No persistence; evict the least recently used keys when memory is full
+          args:
+            - --requirepass
+            - $(VALKEY_PASSWORD)
+            - --save
+            - ""
+            - --appendonly
+            - "no"
+            - --maxmemory
+            - {{ .Values.valkey.maxMemory | quote }}
+            - --maxmemory-policy
+            - allkeys-lru
+          ports:
+            - name: valkey
+              containerPort: 6379
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "valkey-cli -a \"$VALKEY_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: valkey
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.valkey.resources | nindent 12 }}
+          securityContext:
+            {{- include "statusboard.containerSecurity" (dict "readOnly" true) | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+        {{- if .Values.exporters.valkey.enabled }}
+        - name: valkey-exporter
+          image: "{{ .Values.exporters.valkey.image.repository }}:{{ .Values.exporters.valkey.image.tag }}"
+          env:
+            - name: REDIS_ADDR
+              value: redis://127.0.0.1:6379
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: {{ $secret }}, key: valkey-password }
+          ports:
+            - name: metrics
+              containerPort: 9121
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { memory: 64Mi }
+          securityContext:
+            {{- include "statusboard.containerSecurity" (dict "readOnly" true) | nindent 12 }}
+        {{- end }}
+      volumes:
+        - name: data
+          emptyDir: {}
+{{- end }}

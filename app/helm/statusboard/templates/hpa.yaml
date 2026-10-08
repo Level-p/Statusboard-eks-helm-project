@@ -1,0 +1,28 @@
+{{- if .Values.app.autoscaling.enabled }}
+# Adds pods when average CPU passes the target, removes them slowly when load drops.
+# Needs metrics-server (installed by Terraform) and CPU requests on the pods.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "statusboard.fullname" . }}
+  labels:
+    {{- include "statusboard.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "statusboard.fullname" . }}
+  minReplicas: {{ .Values.app.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.app.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.app.autoscaling.targetCPUUtilizationPercentage }}
+  behavior:
+    scaleDown:
+      # Wait 5 minutes of low load before removing pods (avoids flapping)
+      stabilizationWindowSeconds: 300
+{{- end }}

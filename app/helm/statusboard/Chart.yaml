@@ -1,0 +1,19 @@
+apiVersion: v2
+name: statusboard
+description: >-
+  StatusBoard on Amazon EKS: a stateless Go web app (Deployment with autoscaling,
+  spread across Availability Zones), PostgreSQL as a StatefulSet on EBS, a Valkey
+  cache, nightly backups to S3, and Prometheus/Grafana monitoring. One chart,
+  installed twice: staging and prod.
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+keywords:
+  - statusboard
+  - eks
+  - statefulset
+  - postgresql
+  - prometheus
+  - grafana
+maintainers:
+  - name: EKS Learning Project

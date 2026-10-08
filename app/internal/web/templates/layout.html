@@ -1,0 +1,28 @@
+{{define "header"}}<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{.SiteName}} status</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+{{if .ShowBanner}}<div class="env-banner">{{.Environment}} environment: test data, not the real status</div>{{end}}
+<header class="top"><a href="/" class="brand">{{.SiteName}}</a><span class="muted">System status</span></header>
+<main>
+{{end}}
+
+{{define "footer"}}
+</main>
+<footer>StatusBoard {{.Version}} · <a href="/api/v1/status">JSON API</a></footer>
+</body>
+</html>
+{{end}}
+
+{{define "updates"}}
+<ol class="timeline">
+  {{range .}}
+  <li><span class="pill s-{{.Status}}">{{label .Status}}</span> <span class="muted">{{when .CreatedAt}}</span><p>{{.Message}}</p></li>
+  {{end}}
+</ol>
+{{end}}

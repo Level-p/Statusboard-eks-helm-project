@@ -1,0 +1,88 @@
+# Reusable deploy steps for one StatusBoard environment.
+# Used twice by .github/workflows/statusboard-app.yml (staging, then prod),
+# so both environments are always deployed in exactly the same way.
+name: Deploy StatusBoard
+description: helm upgrade one environment and smoke test it
+
+inputs:
+  role-arn:
+    description: IAM role assumed through GitHub OIDC
+    required: true
+  environment:
+    description: staging or prod (namespace statusboard-<environment>)
+    required: true
+  host:
+    description: Public host name, e.g. status.example.com
+    required: true
+  image:
+    description: ECR image without tag
+    required: true
+  tag:
+    description: Image tag (commit SHA)
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Configure AWS credentials (OIDC)
+      uses: aws-actions/configure-aws-credentials@v6
+      with:
+        role-to-assume: ${{ inputs.role-arn }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - uses: azure/setup-helm@v5
+      with:
+        version: ${{ env.HELM_VERSION }}
+
+    - name: Configure kubectl
+      shell: bash
+      run: aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$AWS_REGION"
+
+    - name: Find the certificate and the backup and export buckets
+      id: lookup
+      shell: bash
+      run: |
+        DOMAIN="${{ inputs.host }}"; DOMAIN="${DOMAIN#*.}"
+        ARN=$(aws acm list-certificates --certificate-statuses ISSUED \
+          --query "CertificateSummaryList[?DomainName=='${DOMAIN}'].CertificateArn | [0]" --output text)
+        ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+        echo "cert=$ARN" >> "$GITHUB_OUTPUT"
+        echo "bucket=${CLUSTER_NAME}-backups-${ACCOUNT}" >> "$GITHUB_OUTPUT"
+        echo "exports=${CLUSTER_NAME}-data-exports-${ACCOUNT}" >> "$GITHUB_OUTPUT"
+
+    - name: Helm upgrade --install
+      shell: bash
+      run: |
+        # --atomic rolls back automatically if the pods do not become ready in time
+        helm upgrade --install "$RELEASE" "$CHART" \
+          --namespace "statusboard-${{ inputs.environment }}" \
+          -f "$ENV_VALUES/${{ inputs.environment }}.yaml" \
+          --set image.repository="${{ inputs.image }}" \
+          --set image.tag="${{ inputs.tag }}" \
+          --set ingress.host="${{ inputs.host }}" \
+          --set ingress.certificateArn="${{ steps.lookup.outputs.cert }}" \
+          --set backup.bucket="${{ steps.lookup.outputs.bucket }}" \
+          --set backup.region="$AWS_REGION" \
+          --set dataExport.bucket="${{ steps.lookup.outputs.exports }}" \
+          --wait --timeout 10m --atomic
+
+    - name: Show resources
+      shell: bash
+      run: |
+        NS="statusboard-${{ inputs.environment }}"
+        kubectl get deploy,statefulset,hpa,pods,pvc,ingress,postgresql -n "$NS"
+        echo "Database members (spilo-role shows the primary):"
+        kubectl get pods -n "$NS" -l application=spilo -L spilo-role
+
+    - name: Smoke test
+      shell: bash
+      run: |
+        URL="https://${{ inputs.host }}"
+        for i in $(seq 1 30); do
+          VERSION=$(curl -fsS "$URL/api/v1/status" >/dev/null && curl -fsS "$URL/" | grep -o 'StatusBoard [0-9a-f]\{12\}' || true)
+          if [ "$VERSION" = "StatusBoard ${{ inputs.tag }}" ]; then
+            echo "$URL is serving version ${{ inputs.tag }}"; exit 0
+          fi
+          echo "Waiting for $URL to serve ${{ inputs.tag }} (attempt $i/30, saw: ${VERSION:-nothing})"; sleep 10
+        done
+        echo "Smoke test failed"; exit 1

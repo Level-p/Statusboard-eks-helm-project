@@ -1,0 +1,28 @@
+StatusBoard ({{ .Values.environment }}) is deploying into namespace {{ .Release.Namespace }}.
+
+1. Watch it start (the database pods appear 1-2 minutes after the app pods):
+     kubectl get deploy,statefulset,pods,pvc,hpa,postgresql -n {{ .Release.Namespace }}
+
+   Which database pod is the primary?
+     kubectl get pods -n {{ .Release.Namespace }} -l cluster-name={{ include "statusboard.postgresName" . }} -L spilo-role
+
+2. Open the status page (DNS can take a few minutes on the first deploy):
+     https://{{ .Values.ingress.host }}
+
+3. Get the admin API token:
+     kubectl get secret {{ include "statusboard.secretName" . }} -n {{ .Release.Namespace }} -o jsonpath='{.data.admin-token}' | base64 -d; echo
+
+4. Open an incident:
+     curl -X POST https://{{ .Values.ingress.host }}/api/v1/incidents \
+       -H "Authorization: Bearer <token>" \
+       -d '{"title":"Slow checkout","impact":"major","message":"We are investigating."}'
+{{- if .Values.backup.enabled }}
+
+5. Run a backup now instead of waiting for the schedule ({{ .Values.backup.schedule }} UTC):
+     kubectl create job --from=cronjob/{{ include "statusboard.fullname" . }}-backup manual-backup -n {{ .Release.Namespace }}
+{{- end }}
+{{- if .Values.dataExport.enabled }}
+
+6. Run the monthly data export now ({{ .Values.dataExport.schedule }} UTC otherwise):
+     kubectl create job --from=cronjob/{{ include "statusboard.fullname" . }}-data-export manual-export -n {{ .Release.Namespace }}
+{{- end }}

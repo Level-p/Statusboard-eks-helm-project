@@ -1,0 +1,21 @@
+# Terraform (terraform/ also has its own .gitignore)
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfplan
+tfplan
+
+# Go build output
+/app/statusboard
+/app/statusboard.exe
+
+# Helm packages
+*.tgz
+
+# Editors, OS and Office lock files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+~$*.docx

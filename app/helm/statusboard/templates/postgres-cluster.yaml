@@ -1,0 +1,91 @@
+{{- $pg := .Values.postgres -}}
+{{- $super := include "statusboard.postgresSuperuserSecret" . -}}
+# A highly available PostgreSQL cluster, run by the Zalando postgres-operator
+# (installed by Terraform). From this short description the operator creates:
+#   - a StatefulSet "statusboard-db" with one pod per instance, each with its own EBS disk,
+#     every pod in a different Availability Zone
+#   - Patroni inside every pod: one primary, the others stream every change from it
+#     within milliseconds and one of them is promoted automatically if the primary fails
+#   - Service "statusboard-db" (always points at the primary: the app writes here)
+#     and Service "statusboard-db-repl" (the replicas: backups and exports read here)
+#   - a Secret with the password of each user below
+#   - a PodDisruptionBudget, so node upgrades never take down the primary and a replica together
+apiVersion: acid.zalan.do/v1
+kind: postgresql
+metadata:
+  name: {{ include "statusboard.postgresName" . }}
+  labels:
+    {{- include "statusboard.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+  annotations:
+    # helm uninstall must never delete the database; remove it on purpose instead
+    helm.sh/resource-policy: keep
+spec:
+  teamId: statusboard
+  numberOfInstances: {{ $pg.instances }}
+  postgresql:
+    version: {{ $pg.version | quote }}
+    parameters:
+      max_connections: "100"
+      # Long reads on a replica (backups, exports) are not cancelled by changes on the primary
+      hot_standby_feedback: "on"
+      log_min_duration_statement: "1000"   # log queries slower than 1 s
+  patroni:
+    # true = a write is confirmed only after a replica also has it: a failover loses nothing.
+    # If every replica is down the primary keeps accepting writes (strict mode off).
+    synchronous_mode: {{ $pg.synchronousMode }}
+    synchronous_mode_strict: false
+  volume:
+    size: {{ $pg.persistence.size }}
+    storageClass: {{ $pg.persistence.storageClass }}
+  users:
+    {{ $pg.user }}: [createdb]
+  databases:
+    {{ $pg.database }}: {{ $pg.user }}
+  resources:
+    {{- toYaml $pg.resources | nindent 4 }}
+  {{- if .Values.exporters.postgres.enabled }}
+  # Runs next to PostgreSQL in every pod and turns its statistics into Prometheus
+  # metrics (pg_up, replication lag, connections, database size...)
+  sidecars:
+    - name: postgres-exporter
+      image: "{{ .Values.exporters.postgres.image.repository }}:{{ .Values.exporters.postgres.image.tag }}"
+      ports:
+        - name: metrics
+          containerPort: 9187
+          protocol: TCP
+      env:
+        - name: DATA_SOURCE_URI
+          value: "127.0.0.1:5432/postgres?sslmode=require"
+        - name: DATA_SOURCE_USER
+          valueFrom:
+            secretKeyRef: { name: {{ $super }}, key: username }
+        - name: DATA_SOURCE_PASS
+          valueFrom:
+            secretKeyRef: { name: {{ $super }}, key: password }
+      resources:
+        requests: { cpu: 10m, memory: 32Mi }
+        limits: { cpu: 100m, memory: 64Mi }
+  {{- end }}
+---
+{{- if .Values.exporters.postgres.enabled }}
+# The operator's own Services only expose port 5432, so this one gives
+# Prometheus (through the ServiceMonitor) the exporter port on every member
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "statusboard.postgresName" . }}-metrics
+  labels:
+    {{- include "statusboard.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+    statusboard/metrics: "true"
+spec:
+  type: ClusterIP
+  selector:
+    application: spilo
+    cluster-name: {{ include "statusboard.postgresName" . }}
+  ports:
+    - name: metrics
+      port: 9187
+      targetPort: 9187
+{{- end }}

@@ -1,0 +1,47 @@
+{{- $fullname := include "statusboard.fullname" . -}}
+# App: port "http" is used by the Ingress, port "metrics" only by Prometheus
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "statusboard.labels" . | nindent 4 }}
+    app.kubernetes.io/component: app
+    statusboard/metrics: "true"
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "statusboard.selectorLabels" (dict "root" . "component" "app") | nindent 4 }}
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+    - name: metrics
+      port: 9090
+      targetPort: metrics
+{{- if .Values.valkey.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "statusboard.valkeyName" . }}
+  labels:
+    {{- include "statusboard.labels" . | nindent 4 }}
+    app.kubernetes.io/component: valkey
+    {{- if .Values.exporters.valkey.enabled }}
+    statusboard/metrics: "true"
+    {{- end }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "statusboard.selectorLabels" (dict "root" . "component" "valkey") | nindent 4 }}
+  ports:
+    - name: valkey
+      port: 6379
+      targetPort: valkey
+    {{- if .Values.exporters.valkey.enabled }}
+    - name: metrics
+      port: 9121
+      targetPort: metrics
+    {{- end }}
+{{- end }}

@@ -1,0 +1,100 @@
+{{- if .Values.backup.enabled }}
+{{- $pg := .Values.postgres -}}
+{{- $sa := include "statusboard.backupServiceAccount" . -}}
+# The backup job's AWS permissions come from EKS Pod Identity: Terraform links
+# this ServiceAccount to an IAM role that may only write to this environment's
+# folder in the backup bucket. No AWS keys are stored in the cluster.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $sa }}
+  labels:
+    {{- include "statusboard.labels" . | nindent 4 }}
+---
+# Nightly logical backup (reads from a replica, so the primary is not slowed down):
+#   1. init container "dump":   pg_dump -> /backup/statusboard-<time>.dump
+#   2. container "upload":      aws s3 cp -> s3://<bucket>/<environment>/
+# Old backups are deleted by an S3 lifecycle rule (Terraform), not by this job.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "statusboard.fullname" . }}-backup
+  labels:
+    {{- include "statusboard.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup
+spec:
+  schedule: {{ .Values.backup.schedule | quote }}
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid       # never run two backups at once
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 1800
+      template:
+        metadata:
+          labels:
+            {{- include "statusboard.selectorLabels" (dict "root" . "component" "backup") | nindent 12 }}
+        spec:
+          serviceAccountName: {{ $sa }}
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 70
+            runAsGroup: 70
+            fsGroup: 70
+            seccompProfile:
+              type: RuntimeDefault
+          initContainers:
+            - name: dump
+              image: "{{ $pg.image.repository }}:{{ $pg.image.tag }}"
+              env:
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef: { name: {{ include "statusboard.postgresUserSecret" . }}, key: password }
+                - name: PGSSLMODE
+                  value: require
+              command: ["sh", "-c"]
+              # "$$(" stops Kubernetes from treating $(date ...) as one of its own variables
+              args:
+                - >-
+                  set -e;
+                  FILE=/backup/statusboard-$$(date -u +%Y%m%d-%H%M%S).dump;
+                  pg_dump -h {{ include "statusboard.postgresReadHost" . }} -U {{ $pg.user }} -d {{ $pg.database }} -Fc -f "$FILE";
+                  ls -lh "$FILE"
+              resources:
+                requests: { cpu: 50m, memory: 64Mi }
+                limits: { memory: 256Mi }
+              securityContext:
+                {{- include "statusboard.containerSecurity" (dict "readOnly" true) | nindent 16 }}
+              volumeMounts:
+                - name: backup
+                  mountPath: /backup
+          containers:
+            - name: upload
+              image: "{{ .Values.backup.awsCliImage.repository }}:{{ .Values.backup.awsCliImage.tag }}"
+              env:
+                - name: AWS_REGION
+                  value: {{ .Values.backup.region | quote }}
+                - name: HOME
+                  value: /tmp
+              command: ["sh", "-c"]
+              args:
+                - >-
+                  set -e;
+                  aws s3 cp /backup/ "s3://{{ required "backup.bucket is required when backups are enabled" .Values.backup.bucket }}/{{ include "statusboard.envFolder" . }}/" --recursive --only-show-errors;
+                  echo "Uploaded:"; ls /backup
+              resources:
+                requests: { cpu: 50m, memory: 64Mi }
+                limits: { memory: 256Mi }
+              securityContext:
+                {{- include "statusboard.containerSecurity" (dict "readOnly" false) | nindent 16 }}
+              volumeMounts:
+                - name: backup
+                  mountPath: /backup
+          volumes:
+            - name: backup
+              emptyDir:
+                sizeLimit: 5Gi
+{{- end }}

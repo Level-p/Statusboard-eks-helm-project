@@ -1,0 +1,16 @@
+{{- /* A PDB on a single replica would block node drains, so only create it when there are 2+ replicas */ -}}
+{{- $min := ternary .Values.app.autoscaling.minReplicas .Values.app.replicas .Values.app.autoscaling.enabled -}}
+{{- if and .Values.app.podDisruptionBudget.enabled (gt (int $min) 1) }}
+# During node upgrades and drains, Kubernetes evicts at most one app pod at a time
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "statusboard.fullname" . }}
+  labels:
+    {{- include "statusboard.labels" . | nindent 4 }}
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      {{- include "statusboard.selectorLabels" (dict "root" . "component" "app") | nindent 6 }}
+{{- end }}

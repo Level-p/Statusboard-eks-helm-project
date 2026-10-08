@@ -1,0 +1,8 @@
+{{define "incident.html"}}{{template "header" .}}
+<p><a href="/">&larr; Back to status</a></p>
+<article class="card incident i-{{.Incident.Impact}}">
+  <h1>{{.Incident.Title}}</h1>
+  <p class="muted">{{label .Incident.Impact}} impact · started {{when .Incident.CreatedAt}}{{with .Incident.ResolvedAt}} · resolved {{when .}}{{end}}</p>
+  {{template "updates" .Incident.Updates}}
+</article>
+{{template "footer" .}}{{end}}

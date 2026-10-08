@@ -1,0 +1,51 @@
+# Production: what real users see. Only images that passed staging get here.
+environment: production
+
+app:
+  siteName: StatusBoard
+  autoscaling:
+    enabled: true
+    minReplicas: 3        # one per Availability Zone
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+  resources:
+    requests:
+      cpu: 200m
+      memory: 96Mi
+    limits:
+      memory: 192Mi
+
+postgres:
+  # 1 primary + 2 synchronous-capable replicas, one per Availability Zone
+  instances: 3
+  synchronousMode: true
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 1Gi
+  persistence:
+    size: 20Gi
+
+valkey:
+  maxMemory: 128mb
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 192Mi
+
+backup:
+  schedule: "30 2 * * *"
+
+dataExport:
+  schedule: "0 4 1 * *"
+
+monitoring:
+  prometheusRule:
+    severity: critical
+  grafanaDashboard:
+    enabled: true

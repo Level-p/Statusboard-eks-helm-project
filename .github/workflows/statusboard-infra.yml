@@ -1,0 +1,204 @@
+# ---------------------------------------------------------------------------
+# StatusBoard infrastructure: Terraform for VPC, EKS, ECR, add-ons, Prometheus,
+# Grafana, and the staging/prod environments (folder: terraform/).
+#
+# Push to main  -> scan, plan, apply (apply waits for "infrastructure" approval)
+# Pull request  -> scan and plan only
+# Manual run    -> choose plan, apply or destroy
+#
+# Required repository secrets:
+#   AWS_ROLE_ARN            output of the bootstrap stack (github_actions_role_arn)
+#   GRAFANA_ADMIN_PASSWORD  Grafana admin password
+# ---------------------------------------------------------------------------
+name: StatusBoard Infrastructure
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "terraform/**"
+      - ".github/workflows/statusboard-infra.yml"
+  pull_request:
+    paths:
+      - "terraform/**"
+      - ".github/workflows/statusboard-infra.yml"
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Terraform action"
+        type: choice
+        options: [plan, apply, destroy]
+        default: plan
+
+permissions:
+  id-token: write   # GitHub OIDC -> AWS
+  contents: read
+
+concurrency:
+  group: statusboard-infra
+  cancel-in-progress: false   # never cancel a running apply
+
+env:
+  AWS_REGION: eu-west-2
+  TF_DIR: terraform
+  TF_VERSION: 1.15.6
+  CLUSTER_NAME: statusboard-eks
+  TF_VAR_grafana_admin_password: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
+  TF_IN_AUTOMATION: "true"
+
+jobs:
+  iac-scan:
+    name: Checkov IaC scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Checkov (report only)
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: ${{ env.TF_DIR }}
+          framework: terraform
+          soft_fail: true          # report findings without failing the build
+          output_format: cli
+
+  plan:
+    name: Terraform plan
+    needs: iac-scan
+    if: github.event_name != 'workflow_dispatch' || inputs.action != 'destroy'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ env.TF_DIR }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform fmt
+        run: terraform fmt -check -recursive
+
+      - name: Terraform init
+        run: terraform init -input=false
+
+      - name: Terraform validate
+        run: terraform validate
+
+      - name: Terraform plan
+        run: terraform plan -input=false -out=tfplan
+
+      - name: Upload plan
+        uses: actions/upload-artifact@v7
+        with:
+          name: tfplan
+          path: ${{ env.TF_DIR }}/tfplan
+          retention-days: 5
+
+  apply:
+    name: Terraform apply
+    needs: plan
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' && inputs.action == 'apply')
+    runs-on: ubuntu-latest
+    environment: infrastructure   # add required reviewers in Settings > Environments
+    defaults:
+      run:
+        working-directory: ${{ env.TF_DIR }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 7200   # EKS creation takes 15-20 minutes
+
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Download plan
+        uses: actions/download-artifact@v8
+        with:
+          name: tfplan
+          path: ${{ env.TF_DIR }}
+
+      - name: Terraform init
+        run: terraform init -input=false
+
+      - name: Terraform apply
+        run: terraform apply -input=false tfplan
+
+      - name: Show outputs
+        run: terraform output
+
+  destroy:
+    name: Terraform destroy
+    if: github.event_name == 'workflow_dispatch' && inputs.action == 'destroy'
+    needs: iac-scan
+    runs-on: ubuntu-latest
+    environment: infrastructure
+    defaults:
+      run:
+        working-directory: ${{ env.TF_DIR }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 7200
+
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - uses: azure/setup-helm@v5
+        with:
+          version: v3.22.0
+
+      # Remove things Terraform did not create, otherwise their ALB and EBS
+      # volumes are left behind and block the VPC from being deleted.
+      - name: Remove the StatusBoard releases and their volumes
+        continue-on-error: true
+        run: |
+          aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$AWS_REGION"
+          for ns in statusboard-staging statusboard-prod; do
+            helm uninstall statusboard -n "$ns" --wait || true
+            # "helm uninstall" keeps the database and its secrets on purpose: remove them now.
+            # The postgres-operator (still running) deletes the database pods and Services.
+            kubectl delete postgresql --all -n "$ns" --wait=true || true
+            kubectl delete statefulset -l application=spilo -n "$ns" --wait=true || true
+            kubectl delete pvc --all -n "$ns" --wait=true || true
+            kubectl delete secret --all -n "$ns" || true
+          done
+          echo "Waiting 60s for the load balancer controller to delete the ALB..."
+          sleep 60
+
+      - name: Terraform init
+        run: terraform init -input=false
+
+      - name: Destroy monitoring first
+        run: terraform destroy -input=false -auto-approve -target=module.monitoring
+
+      # StatefulSet volumes (Prometheus, Grafana, Alertmanager) survive helm uninstall
+      - name: Delete monitoring volumes
+        continue-on-error: true
+        run: kubectl delete pvc --all -n monitoring --wait=true || true
+
+      - name: Terraform destroy
+        run: terraform destroy -input=false -auto-approve

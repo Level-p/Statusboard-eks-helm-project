@@ -1,0 +1,48 @@
+# Run StatusBoard locally with the same pieces as on EKS:
+#   docker compose up --build
+#   open http://localhost:8080          (status page)
+#   curl http://localhost:9090/metrics  (Prometheus metrics)
+services:
+  app:
+    build:
+      context: .
+      args:
+        VERSION: local
+    ports:
+      - "8080:8080"
+      - "9090:9090"
+    environment:
+      DATABASE_URL: postgres://statusboard:statusboard@postgres:5432/statusboard?sslmode=disable
+      REDIS_ADDR: valkey:6379
+      ADMIN_TOKEN: local-admin-token
+      ENVIRONMENT: local
+      SITE_NAME: StatusBoard (local)
+      SEED_COMPONENTS: Website,Public API,Payments,Notifications
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: statusboard
+      POSTGRES_USER: statusboard
+      POSTGRES_PASSWORD: statusboard
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U statusboard -d statusboard"]
+      interval: 5s
+      retries: 10
+
+  valkey:
+    image: valkey/valkey:9.2-alpine
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      retries: 10
+
+volumes:
+  pgdata:

@@ -1,0 +1,34 @@
+{{define "status.html"}}{{template "header" .}}
+<section class="overall o-{{.Summary.Overall}}">
+  {{if eq .Summary.Overall "operational"}}All systems operational{{else if eq .Summary.Overall "degraded"}}Some systems are degraded{{else if eq .Summary.Overall "partial_outage"}}Partial outage{{else}}Major outage{{end}}
+</section>
+
+{{range .Summary.ActiveIncidents}}
+<article class="card incident i-{{.Impact}}">
+  <h2><a href="/incidents/{{.ID}}">{{.Title}}</a></h2>
+  <p class="muted">{{label .Impact}} impact · started {{when .CreatedAt}}</p>
+  {{template "updates" .Updates}}
+</article>
+{{end}}
+
+<section class="card">
+  <h2>Components</h2>
+  {{if not .Summary.Components}}<p class="muted">No components yet. Add them with the API.</p>{{end}}
+  <ul class="components">
+    {{range .Summary.Components}}
+    <li><span>{{.Name}}{{if .Description}}<small class="muted"> {{.Description}}</small>{{end}}</span><span class="pill c-{{.Status}}">{{label .Status}}</span></li>
+    {{end}}
+  </ul>
+</section>
+
+<section class="card">
+  <h2>Recently resolved</h2>
+  {{if not .Summary.RecentIncidents}}<p class="muted">No incidents reported recently.</p>{{end}}
+  <ul class="history">
+    {{range .Summary.RecentIncidents}}
+    <li><a href="/incidents/{{.ID}}">{{.Title}}</a> <span class="muted">{{when .CreatedAt}}</span></li>
+    {{end}}
+  </ul>
+</section>
+<p class="muted small">Updated {{when .Summary.GeneratedAt}}</p>
+{{template "footer" .}}{{end}}

@@ -1,0 +1,119 @@
+{{- $fullname := include "statusboard.fullname" . -}}
+{{- $secret := include "statusboard.secretName" . -}}
+{{- $pg := .Values.postgres -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "statusboard.labels" . | nindent 4 }}
+    app.kubernetes.io/component: app
+spec:
+  {{- if not .Values.app.autoscaling.enabled }}
+  # With autoscaling on, the HorizontalPodAutoscaler owns the replica count
+  replicas: {{ .Values.app.replicas }}
+  {{- end }}
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # Start a new pod before stopping an old one: no capacity is lost during a rollout
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      {{- include "statusboard.selectorLabels" (dict "root" . "component" "app") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "statusboard.selectorLabels" (dict "root" . "component" "app") | nindent 8 }}
+        statusboard/environment: {{ .Values.environment | quote }}
+      annotations:
+        # Restart pods when a secret value changes
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      terminationGracePeriodSeconds: 30
+      # Spread replicas across Availability Zones first, then across nodes,
+      # so losing one zone or one node never takes every replica down
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "statusboard.selectorLabels" (dict "root" . "component" "app") | nindent 14 }}
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "statusboard.selectorLabels" (dict "root" . "component" "app") | nindent 14 }}
+      containers:
+        - name: statusboard
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: ENVIRONMENT
+              value: {{ .Values.environment | quote }}
+            - name: SITE_NAME
+              value: {{ .Values.app.siteName | quote }}
+            - name: SEED_COMPONENTS
+              value: {{ join "," .Values.app.seedComponents | quote }}
+            - name: CACHE_TTL
+              value: {{ .Values.app.cacheTTL | quote }}
+            # Password from the Secret the postgres-operator created for this user
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: {{ include "statusboard.postgresUserSecret" . }}, key: password }
+            # $(POSTGRES_PASSWORD) is expanded by Kubernetes from the variable above.
+            # The host is the primary Service, which follows the primary after a failover.
+            # PostgreSQL (Spilo) only accepts encrypted connections, hence sslmode=require.
+            - name: DATABASE_URL
+              value: "postgres://{{ $pg.user }}:$(POSTGRES_PASSWORD)@{{ include "statusboard.postgresName" . }}:5432/{{ $pg.database }}?sslmode=require"
+            {{- if .Values.valkey.enabled }}
+            - name: REDIS_ADDR
+              value: "{{ include "statusboard.valkeyName" . }}:6379"
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: {{ $secret }}, key: valkey-password }
+            {{- end }}
+            - name: ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef: { name: {{ $secret }}, key: admin-token }
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: metrics
+              containerPort: 9090
+          # Startup: give the app up to 60s to connect to PostgreSQL and migrate
+          startupProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 2
+            failureThreshold: 30
+          # Readiness checks the database: an unready pod gets no traffic but is NOT restarted
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 5
+            failureThreshold: 2
+          # Liveness never checks the database, so a database outage cannot restart every pod
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+            failureThreshold: 3
+          lifecycle:
+            # Keep serving for a few seconds after SIGTERM is scheduled, while the load
+            # balancer removes this pod from its targets (avoids 502s during rollouts)
+            preStop:
+              sleep:
+                seconds: {{ .Values.app.preStopSleepSeconds }}
+          resources:
+            {{- toYaml .Values.app.resources | nindent 12 }}
+          securityContext:
+            {{- include "statusboard.containerSecurity" (dict "readOnly" true) | nindent 12 }}

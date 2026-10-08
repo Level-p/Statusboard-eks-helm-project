@@ -1,0 +1,5 @@
+helm/
+*.md
+*.docx
+docker-compose.yml
+.git

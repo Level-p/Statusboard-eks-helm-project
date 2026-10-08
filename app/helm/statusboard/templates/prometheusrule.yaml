@@ -1,0 +1,107 @@
+{{- if and .Values.monitoring.prometheusRule.enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1/PrometheusRule") }}
+{{- $ns := .Release.Namespace -}}
+{{- $fullname := include "statusboard.fullname" . -}}
+{{- $severity := .Values.monitoring.prometheusRule.severity -}}
+{{- $pgName := include "statusboard.postgresName" . -}}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "statusboard.labels" . | nindent 4 }}
+    {{- with .Values.monitoring.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: statusboard-{{ .Values.environment }}
+      rules:
+        # RED method: Errors
+        - alert: StatusBoardHighErrorRate
+          expr: |
+            sum(rate(statusboard_http_requests_total{namespace="{{ $ns }}", code=~"5.."}[5m]))
+              / clamp_min(sum(rate(statusboard_http_requests_total{namespace="{{ $ns }}"}[5m])), 1e-9) > 0.05
+          for: 5m
+          labels: { severity: {{ $severity }}, environment: {{ .Values.environment }} }
+          annotations:
+            summary: More than 5% of StatusBoard requests fail in {{ $ns }}
+            description: Check the app logs with kubectl logs -l app.kubernetes.io/component=app -n {{ $ns }}
+        # RED method: Duration
+        - alert: StatusBoardSlowResponses
+          expr: |
+            histogram_quantile(0.95, sum by (le) (rate(statusboard_http_request_duration_seconds_bucket{namespace="{{ $ns }}"}[5m]))) > 0.5
+          for: 10m
+          labels: { severity: warning, environment: {{ .Values.environment }} }
+          annotations:
+            summary: 95% of StatusBoard requests in {{ $ns }} are slower than 0.5 s
+        - alert: StatusBoardReplicasUnavailable
+          expr: |
+            kube_deployment_status_replicas_available{namespace="{{ $ns }}", deployment="{{ $fullname }}"}
+              < kube_deployment_spec_replicas{namespace="{{ $ns }}", deployment="{{ $fullname }}"}
+          for: 10m
+          labels: { severity: warning, environment: {{ .Values.environment }} }
+          annotations:
+            summary: Some StatusBoard pods in {{ $ns }} have not been available for 10 minutes
+        # ---- Highly available PostgreSQL (postgres-operator + Patroni) ----
+        - alert: StatusBoardPostgresDown
+          expr: max(pg_up{namespace="{{ $ns }}"}) == 0 or absent(pg_up{namespace="{{ $ns }}"})
+          for: 2m
+          labels: { severity: {{ $severity }}, environment: {{ .Values.environment }} }
+          annotations:
+            summary: No PostgreSQL member in {{ $ns }} is reachable
+        - alert: StatusBoardPostgresMemberDown
+          expr: |
+            kube_statefulset_status_replicas_ready{namespace="{{ $ns }}", statefulset="{{ $pgName }}"}
+              < kube_statefulset_replicas{namespace="{{ $ns }}", statefulset="{{ $pgName }}"}
+          for: 10m
+          labels: { severity: warning, environment: {{ .Values.environment }} }
+          annotations:
+            summary: A PostgreSQL member in {{ $ns }} is not ready, so the cluster has less protection against failures
+            description: Check kubectl get pods -l cluster-name={{ $pgName }} -n {{ $ns }} and the Patroni state with patronictl list
+        - alert: StatusBoardPostgresNoPrimary
+          expr: count(pg_replication_is_replica{namespace="{{ $ns }}"} == 0) != 1
+          for: 2m
+          labels: { severity: {{ $severity }}, environment: {{ .Values.environment }} }
+          annotations:
+            summary: PostgreSQL in {{ $ns }} has no primary, or more than one
+        {{- if gt (int .Values.postgres.instances) 1 }}
+        - alert: StatusBoardPostgresReplicationLag
+          expr: max(pg_replication_lag_seconds{namespace="{{ $ns }}"}) > 30
+          for: 5m
+          labels: { severity: warning, environment: {{ .Values.environment }} }
+          annotations:
+            summary: A PostgreSQL replica in {{ $ns }} is more than 30 s behind the primary
+        {{- end }}
+        - alert: StatusBoardPostgresDiskFilling
+          expr: |
+            kubelet_volume_stats_available_bytes{namespace="{{ $ns }}", persistentvolumeclaim=~"pgdata-{{ $pgName }}-.*"}
+              / kubelet_volume_stats_capacity_bytes{namespace="{{ $ns }}", persistentvolumeclaim=~"pgdata-{{ $pgName }}-.*"} < 0.15
+          for: 15m
+          labels: { severity: warning, environment: {{ .Values.environment }} }
+          annotations:
+            summary: A PostgreSQL volume in {{ $ns }} has less than 15% free space
+        {{- if .Values.backup.enabled }}
+        - alert: StatusBoardBackupFailed
+          expr: kube_job_status_failed{namespace="{{ $ns }}", job_name=~"{{ $fullname }}-backup-.*"} > 0
+          labels: { severity: warning, environment: {{ .Values.environment }} }
+          annotations:
+            summary: A StatusBoard backup job failed in {{ $ns }}
+        - alert: StatusBoardBackupMissing
+          expr: time() - kube_cronjob_status_last_successful_time{namespace="{{ $ns }}", cronjob="{{ $fullname }}-backup"} > 26 * 3600
+          labels: { severity: {{ $severity }}, environment: {{ .Values.environment }} }
+          annotations:
+            summary: No successful StatusBoard backup in {{ $ns }} for more than 26 hours
+        {{- end }}
+        {{- if .Values.dataExport.enabled }}
+        - alert: StatusBoardDataExportFailed
+          expr: kube_job_status_failed{namespace="{{ $ns }}", job_name=~"{{ $fullname }}-data-export-.*"} > 0
+          labels: { severity: warning, environment: {{ .Values.environment }} }
+          annotations:
+            summary: The monthly data export failed in {{ $ns }}; the data team will not get this month's snapshot
+        - alert: StatusBoardDataExportMissing
+          expr: time() - kube_cronjob_status_last_successful_time{namespace="{{ $ns }}", cronjob="{{ $fullname }}-data-export"} > 33 * 86400
+          labels: { severity: warning, environment: {{ .Values.environment }} }
+          annotations:
+            summary: No successful data export in {{ $ns }} for more than 33 days
+        {{- end }}
+{{- end }}

@@ -1,0 +1,47 @@
+{{- if .Values.ingress.enabled }}
+{{- $fullname := include "statusboard.fullname" . -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "statusboard.labels" . | nindent 4 }}
+  annotations:
+    # AWS Load Balancer Controller: public ALB that sends traffic straight to pod IPs
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    # Staging, prod and Grafana share ONE ALB (saves about $20 a month per extra ALB)
+    alb.ingress.kubernetes.io/group.name: {{ .Values.ingress.groupName | quote }}
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    alb.ingress.kubernetes.io/healthcheck-path: /readyz
+    alb.ingress.kubernetes.io/success-codes: "200"
+    # Check targets often so a failed pod leaves the ALB quickly
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: "10"
+    alb.ingress.kubernetes.io/healthy-threshold-count: "2"
+    # Shorter than the default 300s so rollouts finish faster; must stay below
+    # preStopSleepSeconds + the app's shutdown time
+    alb.ingress.kubernetes.io/target-group-attributes: deregistration_delay.timeout_seconds=20
+    {{- with .Values.ingress.certificateArn }}
+    alb.ingress.kubernetes.io/certificate-arn: {{ . | quote }}
+    {{- end }}
+    # ExternalDNS creates the Route 53 record for this host
+    external-dns.alpha.kubernetes.io/hostname: {{ .Values.ingress.host | quote }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  tls:
+    # No secretName: the ALB uses the ACM certificate that matches this host
+    - hosts:
+        - {{ .Values.ingress.host | quote }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $fullname }}
+                port:
+                  name: http
+{{- end }}

@@ -1,0 +1,31 @@
+# Staging: where every change lands first. Smaller and cheaper than prod,
+# but built from the same chart and the same image, so it is a real rehearsal.
+environment: staging
+
+app:
+  siteName: StatusBoard (staging)
+  replicas: 2
+  autoscaling:
+    enabled: false
+
+postgres:
+  # 2 pods: enough to rehearse a failover in staging, cheaper than 3
+  instances: 2
+  synchronousMode: false
+  persistence:
+    size: 5Gi
+
+backup:
+  # Backups also run in staging, so a broken backup is noticed before it matters
+  schedule: "0 3 * * *"
+
+dataExport:
+  # Runs in staging too, so a broken export is noticed before the data team needs it.
+  # Staging exports go to the staging/ folder, which the data team cannot read.
+  schedule: "0 5 1 * *"
+
+monitoring:
+  prometheusRule:
+    severity: warning
+  grafanaDashboard:
+    enabled: false
