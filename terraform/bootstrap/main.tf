@@ -41,9 +41,14 @@ resource "aws_iam_role" "github_actions" {
         StringEquals = {
           "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
         }
-        # Only workflows from YOUR repository can assume this role
+        # Only workflows from YOUR repository can assume this role.
+        # Classic subject:   repo:OWNER/REPO:...
+        # Immutable subject: repo:OWNER@ownerId/REPO@repoId:... (newer repositories)
         StringLike = {
-          "token.actions.githubusercontent.com:sub" = "repo:${var.github_repository}:*"
+          "token.actions.githubusercontent.com:sub" = compact([
+            "repo:${var.github_repository}:*",
+            var.github_subject_prefix == "" ? "" : "${var.github_subject_prefix}:*",
+          ])
         }
       }
     }]
