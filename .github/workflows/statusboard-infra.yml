@@ -72,6 +72,17 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # An empty secret makes the next step fail with the vague
+      # "Could not load credentials from any providers"
+      - name: Check the AWS_ROLE_ARN secret
+        env:
+          ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+        run: |
+          if [ -z "$ROLE_ARN" ]; then
+            echo "::error::Secret AWS_ROLE_ARN is empty. Add it under Settings > Secrets and variables > Actions > Repository secrets (value: terraform -chdir=terraform/bootstrap output -raw github_actions_role_arn)."
+            exit 1
+          fi
+
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v6
         with:
@@ -116,6 +127,17 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # An empty secret makes the next step fail with the vague
+      # "Could not load credentials from any providers"
+      - name: Check the AWS_ROLE_ARN secret
+        env:
+          ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+        run: |
+          if [ -z "$ROLE_ARN" ]; then
+            echo "::error::Secret AWS_ROLE_ARN is empty. Add it under Settings > Secrets and variables > Actions > Repository secrets (value: terraform -chdir=terraform/bootstrap output -raw github_actions_role_arn)."
+            exit 1
+          fi
+
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v6
         with:
@@ -154,6 +176,17 @@ jobs:
         working-directory: ${{ env.TF_DIR }}
     steps:
       - uses: actions/checkout@v7
+
+      # An empty secret makes the next step fail with the vague
+      # "Could not load credentials from any providers"
+      - name: Check the AWS_ROLE_ARN secret
+        env:
+          ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+        run: |
+          if [ -z "$ROLE_ARN" ]; then
+            echo "::error::Secret AWS_ROLE_ARN is empty. Add it under Settings > Secrets and variables > Actions > Repository secrets (value: terraform -chdir=terraform/bootstrap output -raw github_actions_role_arn)."
+            exit 1
+          fi
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v6
