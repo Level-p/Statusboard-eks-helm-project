@@ -65,7 +65,7 @@ aws eks update-kubeconfig --name statusboard-eks --region eu-west-2
 | `environments` | `staging` (7-day backups), `prod` (30-day backups) | One namespace, backup folder and backup role per entry |
 | `data_team_user_names` | `[]` | IAM users allowed to download production data exports (read-only) |
 | `nat_gateway_per_az` | `false` | `true` = one NAT Gateway per Availability Zone (survives a zone outage, about USD 70 a month more) |
-| `node_instance_types` | `["t3.large"]` | Worker server size |
+| `node_instance_types` | `["t3.medium"]` | Worker server size (2 vCPU, 4 GiB; VPC CNI prefix delegation lets each node run up to 110 pods) |
 | `expose_prometheus` | `false` | Prometheus has no login page; keep it private unless you add authentication |
 
 ## Outputs

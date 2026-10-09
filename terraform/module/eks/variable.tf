@@ -27,7 +27,7 @@ variable "admin_principal_arns" {
 variable "instance_types" {
   description = "EC2 instance types for the managed node group"
   type        = list(string)
-  default     = ["t3.large"]
+  default     = ["t3.medium"]
 }
 
 variable "capacity_type" {
