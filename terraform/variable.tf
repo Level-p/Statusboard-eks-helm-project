@@ -29,7 +29,7 @@ variable "admin_principal_arns" {
 
 variable "node_instance_types" {
   type    = list(string)
-  default = ["t3.large"]
+  default = ["t3.medium"]
 }
 
 variable "grafana_admin_password" {
