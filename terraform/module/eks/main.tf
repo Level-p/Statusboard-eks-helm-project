@@ -173,7 +173,7 @@ resource "aws_eks_node_group" "this" {
     ignore_changes = [scaling_config[0].desired_size]
   }
 
-  depends_on = [aws_iam_role_policy_attachment.node]
+  depends_on = [aws_iam_role_policy_attachment.node, aws_eks_addon.vpc_cni]
 }
 
 # ---- Core add-ons ----
@@ -182,6 +182,16 @@ resource "aws_eks_addon" "vpc_cni" {
   addon_name                  = "vpc-cni"
   resolve_conflicts_on_create = "OVERWRITE"
   resolve_conflicts_on_update = "OVERWRITE"
+
+  # Prefix delegation: each network interface slot gets a /28 (16 IPs) instead of
+  # 1 IP, so a t3.medium can run 110 pods instead of 17. Must be on before the
+  # nodes are created (the node group depends on this add-on).
+  configuration_values = jsonencode({
+    env = {
+      ENABLE_PREFIX_DELEGATION = "true"
+      WARM_PREFIX_TARGET       = "1"
+    }
+  })
 }
 
 resource "aws_eks_addon" "kube_proxy" {
